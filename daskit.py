@@ -25,10 +25,11 @@ import pandas as pd
 import dask.bag as db
 
 from dask import do
-from dask.diagnostics import ProgressBar
+from dask import get
+from dask.diagnostics import Profiler
 
-from cytoolz import concat
-from toolz.compatibility import map, zip
+from cytoolz import concat, merge
+from toolz.compatibility import zip
 
 from bokeh.charts import TimeSeries, show, output_file
 
