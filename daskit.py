@@ -14,10 +14,8 @@ import glob
 import re
 import csv
 
-from itertools import tee, chain
+from itertools import chain
 from time import time
-
-from tqdm import tqdm
 
 import h5py
 
