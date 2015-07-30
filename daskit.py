@@ -14,8 +14,10 @@ import glob
 import re
 import csv
 
-from itertools import chain
+from itertools import tee, chain
 from time import time
+
+from tqdm import tqdm
 
 import h5py
 
@@ -24,8 +26,9 @@ import pandas as pd
 
 import dask.bag as db
 
+import dask
 from dask import do
-from dask.diagnostics import ProgressBar
+from dask.diagnostics import ProgressBar, Profiler
 
 from cytoolz import concat
 from toolz.compatibility import map, zip
@@ -78,21 +81,36 @@ def store(data, path, header):
         writer.writerows(concat(data))
 
 
+def doit(files, total_size):
+    t = do(top10)
+    hc = store([t(f) for f in files],
+               'csv/hotcold.csv',
+               header=('date', 'row', 'col', 'temp'))
+    s = do(summarize)
+    sm = store([s(f) for f in files],
+               'csv/summary.csv',
+               header=('date', 'len', 'mean', 'median', 'std'))
+    return hc, sm
+
+
 def bagit(files, total_size):
     bag = db.from_sequence(files)
-    hc = store(bag.map(top10), 'csv/hotcold.csv',
+    hc = bag.map(top10)
+    sm = bag.map(summarize)
+    hc = store(hc, 'csv/hotcold.csv',
                header=('date', 'cat', 'row', 'col', 'temp'))
-    sm = store(bag.map(summarize), 'csv/summary.csv',
+    sm = store(sm, 'csv/summary.csv',
                header=('date', 'len', 'mean', 'median', 'std'))
     return hc, sm
 
 
 def timeit(f, files, total_size):
     dsk = do(tuple)(f(files, total_size))
-    with ProgressBar():
-        start = time()
-        result = dsk.compute()
-        stop = time()
+    start = time()
+    with Profiler() as prof:
+        result = dsk.compute(get=dask.multiprocessing.get)
+    stop = time()
+    prof.visualize()
     return result, stop - start
 
 
@@ -139,6 +157,6 @@ def fileset_size(files):
 if __name__ == '__main__':
     files = [f for f in glob.glob(os.path.join('raw', '*.he5'))]
     total_size = fileset_size(files)
-    _, d = timeit(bagit, files, total_size)
-    print('bagit, %.2f G, %d files, %.2f s' % (total_size / 1e9, len(files), d))
+    _, d = timeit(doit, files, total_size)
+    print('doit, %.2f G, %d files, %.2f s' % (total_size / 1e9, len(files), d))
     # heatmap('csv/hotcold.csv')
