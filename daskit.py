@@ -80,19 +80,30 @@ def store(data, path, header):
 
 def bagit(files, total_size):
     bag = db.from_sequence(files)
-    hc = store(bag.map(top10), 'csv/hotcold.csv',
-               header=('date', 'cat', 'row', 'col', 'temp'))
-    sm = store(bag.map(summarize), 'csv/summary.csv',
-               header=('date', 'len', 'mean', 'median', 'std'))
+    hc = bag.map(top10)
+    sm = bag.map(summarize)
+    dsk = merge(dict(result=(tuple, [(concat, hc._keys()),
+                                     (concat, sm._keys())])),
+                hc.dask, sm.dask)
+
+    with Profiler() as prof:
+        hc, sm = get(dsk, 'result')
+
+    store(hc,
+          'csv/hotcold.csv',
+          header=('date', 'cat', 'row', 'col', 'temp'))
+    store(sm,
+          'csv/summary.csv',
+          header=('date', 'len', 'mean', 'median', 'std'))
+
+    prof.visualize()
     return hc, sm
 
 
 def timeit(f, files, total_size):
-    dsk = do(tuple)(f(files, total_size))
-    with ProgressBar():
-        start = time()
-        result = dsk.compute()
-        stop = time()
+    start = time()
+    result = f(files, total_size)
+    stop = time()
     return result, stop - start
 
 
