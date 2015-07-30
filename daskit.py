@@ -80,18 +80,6 @@ def store(data, path, header):
         writer.writerows(concat(data))
 
 
-def doit(files, total_size):
-    t = do(top10)
-    hc = store([t(f) for f in files],
-               'csv/hotcold.csv',
-               header=('date', 'row', 'col', 'temp'))
-    s = do(summarize)
-    sm = store([s(f) for f in files],
-               'csv/summary.csv',
-               header=('date', 'len', 'mean', 'median', 'std'))
-    return hc, sm
-
-
 def bagit(files, total_size):
     bag = db.from_sequence(files)
     hc = store(bag.map(top10), 'csv/hotcold.csv',
@@ -150,25 +138,8 @@ def fileset_size(files):
     return sum(get_h5py_size(f) for f in files)
 
 
-def benchmark(files, chunksize=50):
-    def chunks_of(sliceable, chunksize):
-        for i in tqdm(range(0, len(sliceable), chunksize)):
-            yield sliceable[i:i + chunksize]
-
-    a, b, c = tee(chunks_of(files, chunksize), n=3)
-    lst = [(f.__name__, nfiles, timeit(f, fs, datasize)[1])
-           for fs, nfiles, datasize in zip(a,
-                                           map(len, b),
-                                           map(fileset_size, c))
-           for f in doit, bagit]
-
-    df = pd.DataFrame(lst, columns=['algo', 'nfiles', 'duration'])
-    df['algo'] = df.algo.astype('category')
-    df.to_hdf('dur.h5', '/duration', mode='w', append=True)
-
-
 if __name__ == '__main__':
-    files = [f for f in glob.glob(os.path.join('raw', '*.he5'))][:2]
+    files = [f for f in glob.glob(os.path.join('raw', '*.he5'))]
     total_size = fileset_size(files)
     _, d = timeit(bagit, files, total_size)
     print('bagit, %.2f G, %d files, %.2f s' % (total_size / 1e9, len(files), d))
