@@ -81,36 +81,34 @@ def store(data, path, header):
         writer.writerows(concat(data))
 
 
-def doit(files, total_size):
+def doit(files):
     t = do(top10)
     hc = store([t(f) for f in files],
-               'csv/hotcold.csv',
+               'csv/hotcold.do.csv',
                header=('date', 'row', 'col', 'temp'))
     s = do(summarize)
     sm = store([s(f) for f in files],
-               'csv/summary.csv',
+               'csv/summary.do.csv',
                header=('date', 'len', 'mean', 'median', 'std'))
     return hc, sm
 
 
-def bagit(files, total_size):
+def bagit(files):
     bag = db.from_sequence(files)
     hc = bag.map(top10)
     sm = bag.map(summarize)
-    hc = store(hc, 'csv/hotcold.csv',
-               header=('date', 'cat', 'row', 'col', 'temp'))
-    sm = store(sm, 'csv/summary.csv',
+    hc = store(hc, 'csv/hotcold.bag.csv',
+               header=('date', 'row', 'col', 'temp'))
+    sm = store(sm, 'csv/summary.bag.csv',
                header=('date', 'len', 'mean', 'median', 'std'))
     return hc, sm
 
 
-def timeit(f, files, total_size):
-    dsk = do(tuple)(f(files, total_size))
+def timeit(f, files):
+    dsk = do(tuple)(f(files))
     start = time()
-    with Profiler() as prof:
-        result = dsk.compute(get=dask.multiprocessing.get)
+    result = dsk.compute()
     stop = time()
-    prof.visualize()
     return result, stop - start
 
 
