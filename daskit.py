@@ -9,8 +9,9 @@ https://hdfgroup.org/wp/2015/04/putting-some-spark-into-hdf-eos/
 
 from __future__ import print_function, division
 
-import os
+import sys
 import glob
+import os
 import re
 import csv
 
@@ -22,15 +23,19 @@ import h5py
 import numpy as np
 import pandas as pd
 
+import dask
 import dask.bag as db
 
-from dask import do
-from dask.diagnostics import ProgressBar
+from dask import do, value
+from dask.diagnostics import ProgressBar, Profiler
 
 from cytoolz import concat
 from toolz.compatibility import map, zip
 
 from bokeh.charts import TimeSeries, show, output_file
+
+
+rx = re.compile(r'^GSSTF_NCEP\.3\.(\d{4}\.\d{2}\.\d{2})\.he5$')
 
 
 def data(filename):
@@ -39,20 +44,16 @@ def data(filename):
         fill = dset.attrs['_FillValue'][0]
         x = dset[:]
         cols = dset.shape[1]
-    return x[x != fill], cols
+    cond = x != fill
+    return (rx.match(os.path.basename(filename)).group(1).replace('.', '-'),
+            x[cond],
+            len(x) - cond.sum(),
+            cols)
 
 
-rx = re.compile(r'^GSSTF_NCEP\.3\.(\d{4}\.\d{2}\.\d{2})\.he5$')
-
-
-def date_from_filename(filename, rx=rx):
-    return re.match(rx, filename).group(1).replace('.', '-')
-
-
-def summarize(filename):
-    v, _ = data(filename)
-    return [(date_from_filename(os.path.basename(filename)),
-             len(v), np.mean(v), np.median(v), np.std(v, ddof=1))]
+def summarize(date, v, nmissing, cols):
+    return [(date, len(v), nmissing, np.mean(v), np.median(v),
+            np.std(v, ddof=1))]
 
 
 def argtopk(k, x):
@@ -61,9 +62,7 @@ def argtopk(k, x):
     return ind[x[ind].argsort()]
 
 
-def top10(filename):
-    date = date_from_filename(os.path.basename(filename))
-    v, cols = data(filename)
+def top10(date, v, nmissing, cols):
     argtop, argbottom = argtopk(10, v), argtopk(10, -v)
     assert len(argtop) == len(argbottom), 'length of top and bottom not equal'
     return [(date, int(p // cols), p % cols, v[p])
@@ -78,21 +77,27 @@ def store(data, path, header):
         writer.writerows(concat(data))
 
 
-def bagit(files, total_size):
-    bag = db.from_sequence(files)
-    hc = store(bag.map(top10), 'csv/hotcold.csv',
-               header=('date', 'cat', 'row', 'col', 'temp'))
-    sm = store(bag.map(summarize), 'csv/summary.csv',
-               header=('date', 'len', 'mean', 'median', 'std'))
-    return hc, sm
+def doit(files):
+    datacols = [do(data)(f) for f in files]
+    tops = [do(top10)(v[0], v[1], v[2], v[3]) for v in datacols]
+    summaries = [do(summarize)(v[0], v[1], v[2], v[3])
+                 for v in datacols]
+    return do(concat)((tops, summaries))
 
 
-def timeit(f, files, total_size):
-    dsk = do(tuple)(f(files, total_size))
-    with ProgressBar():
-        start = time()
+def bagit(files):
+    bag = db.from_sequence(files).map(data)
+    return db.concat([bag.map(top10), bag.map(summarize)])
+
+
+def timeit(f, files):
+    dsk = f(files)
+    start = time()
+    with ProgressBar(), Profiler() as prof:
         result = dsk.compute()
-        stop = time()
+    stop = time()
+    prof.visualize(palette='OrRd')
+    getattr(dsk, 'visualize', getattr(dsk, '_visualize', None))()
     return result, stop - start
 
 
@@ -136,9 +141,39 @@ def fileset_size(files):
     return sum(get_h5py_size(f) for f in files)
 
 
-if __name__ == '__main__':
-    files = [f for f in glob.glob(os.path.join('raw', '*.he5'))]
+def dask(files, algorithm):
+    return timeit(dict(do=doit, bag=bagit)[algorithm], files)
+
+
+def spark(files, algorithm):
+    from pyspark import SparkContext
+    sc = SparkContext()
+    rdd = sc.parallelize(files)
+    result = rdd.map(top10).union(rdd.map(summarize))
+    start = time()
+    x = result.collect()
+    stop = time()
+    return x, stop - start
+
+
+def main(args):
+    files = [f for f in glob.glob(os.path.join('raw', '*.he5'))][:args.nfiles]
     total_size = fileset_size(files)
-    _, d = timeit(bagit, files, total_size)
-    print('bagit, %.2f G, %d files, %.2f s' % (total_size / 1e9, len(files), d))
+    _, d = dict(dask=dask, spark=spark)[args.engine](files, args.algorithm)
+
+    print('%s, %s, %.2f G, %d files, %.2f s' %
+          (args.engine, args.algorithm if args.engine == 'dask' else '--',
+           total_size / 1e9, len(files), d))
+
     # heatmap('csv/hotcold.csv')
+
+
+
+if __name__ == '__main__':
+    import argparse
+
+    p = argparse.ArgumentParser()
+    p.add_argument('-n', '--nfiles', default=None, type=int)
+    p.add_argument('-a', '--algorithm', choices=('bag', 'do'), default='do')
+    p.add_argument('-e', '--engine', choices=('dask', 'spark'), default='dask')
+    main(p.parse_args())
