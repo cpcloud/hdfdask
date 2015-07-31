@@ -10,6 +10,7 @@ https://hdfgroup.org/wp/2015/04/putting-some-spark-into-hdf-eos/
 from __future__ import print_function, division
 
 import os
+import sys
 import glob
 import re
 import csv
@@ -24,7 +25,7 @@ import pandas as pd
 
 import dask.bag as db
 
-from dask import do
+from dask import do, value
 from dask.diagnostics import ProgressBar
 
 from cytoolz import concat
@@ -33,26 +34,23 @@ from toolz.compatibility import map, zip
 from bokeh.charts import TimeSeries, show, output_file
 
 
+rx = re.compile(r'^GSSTF_NCEP\.3\.(\d{4}\.\d{2}\.\d{2})\.he5$')
+
+
 def data(filename):
     with h5py.File(filename, mode='r') as f:
         dset = f['/HDFEOS/GRIDS/NCEP/Data Fields/Tair_2m']
         fill = dset.attrs['_FillValue'][0]
         x = dset[:]
         cols = dset.shape[1]
-    return x[x != fill], cols
+    cond = x != fill
+    nmissing = len(x) - cond.sum()
+    date = re.match(rx, os.path.basename(filename)).group(1).replace('.', '-')
+    return date, nmissing, x[cond], cols
 
 
-rx = re.compile(r'^GSSTF_NCEP\.3\.(\d{4}\.\d{2}\.\d{2})\.he5$')
-
-
-def date_from_filename(filename, rx=rx):
-    return re.match(rx, filename).group(1).replace('.', '-')
-
-
-def summarize(filename):
-    v, _ = data(filename)
-    return [(date_from_filename(os.path.basename(filename)),
-             len(v), np.mean(v), np.median(v), np.std(v, ddof=1))]
+def summarize(date, nmissing, v, cols):
+    return [(date, len(v), np.mean(v), np.median(v), np.std(v, ddof=1))]
 
 
 def argtopk(k, x):
@@ -61,9 +59,7 @@ def argtopk(k, x):
     return ind[x[ind].argsort()]
 
 
-def top10(filename):
-    date = date_from_filename(os.path.basename(filename))
-    v, cols = data(filename)
+def top10(date, nmissing, v, cols):
     argtop, argbottom = argtopk(10, v), argtopk(10, -v)
     assert len(argtop) == len(argbottom), 'length of top and bottom not equal'
     return [(date, int(p // cols), p % cols, v[p])
@@ -78,8 +74,8 @@ def store(data, path, header):
         writer.writerows(concat(data))
 
 
-def bagit(files, total_size):
-    bag = db.from_sequence(files)
+def bagit(files):
+    bag = db.from_sequence(files).map(data)
     hc = store(bag.map(top10), 'csv/hotcold.csv',
                header=('date', 'cat', 'row', 'col', 'temp'))
     sm = store(bag.map(summarize), 'csv/summary.csv',
@@ -87,8 +83,20 @@ def bagit(files, total_size):
     return hc, sm
 
 
-def timeit(f, files, total_size):
-    dsk = do(tuple)(f(files, total_size))
+def doit(files):
+    datafiles = [do(data)(f) for f in files]
+    tens = [do(top10)(v[0], v[1], v[2], v[3]) for v in datafiles]
+    summaries = [do(summarize)(v[0], v[1], v[2], v[3])
+                 for v in datafiles]
+    hc = store(tens, 'csv/hotcold.csv',
+               header=('date', 'cat', 'row', 'col', 'temp'))
+    sm = store(summaries, 'csv/summary.csv',
+               header=('date', 'len', 'mean', 'median', 'std'))
+    return hc, sm
+
+
+def timeit(f, files):
+    dsk = value(f(files))
     with ProgressBar():
         start = time()
         result = dsk.compute()
@@ -139,6 +147,8 @@ def fileset_size(files):
 if __name__ == '__main__':
     files = [f for f in glob.glob(os.path.join('raw', '*.he5'))]
     total_size = fileset_size(files)
-    _, d = timeit(bagit, files, total_size)
-    print('bagit, %.2f G, %d files, %.2f s' % (total_size / 1e9, len(files), d))
+    runner = dict(do=doit, bag=bagit)[sys.argv[1]]
+    _, d = timeit(runner, files)
+    print('%s, %.2f G, %d files, %.2f s' %
+          (runner.__name__, total_size / 1e9, len(files), d))
     # heatmap('csv/hotcold.csv')
