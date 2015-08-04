@@ -102,8 +102,8 @@ def sparkit(files):
     for p in paths:
         if os.path.exists(p):
             shutil.rmtree(p)
-    tens = bag.map(lambda args: ','.join(map(str, top10(*args)[0])) + '\n').saveAsTextFile(tensf)
-    summaries = bag.map(lambda args: ','.join(map(str, summarize(*args)[0])) + '\n').saveAsTextFile(sparkf)
+    tens = bag.map(lambda args: ','.join(map(str, top10(*args)[0]))).saveAsTextFile(tensf)
+    summaries = bag.map(lambda args: ','.join(map(str, summarize(*args)[0]))).saveAsTextFile(sparkf)
     return tens, summaries
 
 
