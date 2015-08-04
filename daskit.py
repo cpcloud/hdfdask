@@ -14,6 +14,7 @@ import sys
 import glob
 import re
 import csv
+import shutil
 
 from itertools import chain
 from time import time
@@ -21,7 +22,6 @@ from time import time
 import h5py
 
 import numpy as np
-import pandas as pd
 
 import dask.bag as db
 
@@ -29,10 +29,10 @@ from dask import do, value
 from dask.diagnostics import ProgressBar
 
 from cytoolz import concat
-from toolz.compatibility import map, zip
 
-from bokeh.charts import TimeSeries, show, output_file
+from pyspark import SparkContext
 
+sc = SparkContext()
 
 rx = re.compile(r'^GSSTF_NCEP\.3\.(\d{4}\.\d{2}\.\d{2})\.he5$')
 
@@ -41,10 +41,11 @@ def data(filename):
     with h5py.File(filename, mode='r') as f:
         dset = f['/HDFEOS/GRIDS/NCEP/Data Fields/Tair_2m']
         fill = dset.attrs['_FillValue'][0]
-        x = dset[:]
+        x = dset[:].ravel()
         cols = dset.shape[1]
     cond = x != fill
     nmissing = len(x) - cond.sum()
+    assert nmissing > 0
     date = re.match(rx, os.path.basename(filename)).group(1).replace('.', '-')
     return date, nmissing, x[cond], cols
 
@@ -95,44 +96,30 @@ def doit(files):
     return hc, sm
 
 
+def sparkit(files):
+    bag = sc.parallelize(files).map(data)
+    paths = tensf, sparkf = 'csv/hotcold.spark.csv', 'csv/summary.spark.csv'
+    for p in paths:
+        if os.path.exists(p):
+            shutil.rmtree(p)
+    tens = bag.map(lambda args: ','.join(map(str, top10(*args)[0])) + '\n').saveAsTextFile(tensf)
+    summaries = bag.map(lambda args: ','.join(map(str, summarize(*args)[0])) + '\n').saveAsTextFile(sparkf)
+    return tens, summaries
+
+
 def timeit(f, files):
-    dsk = value(f(files))
-    with ProgressBar():
+    if f.__name__ == 'sparkit':
         start = time()
-        result = dsk.compute()
+        result = f(files)
         stop = time()
-    return result, stop - start
-
-
-def mean_median_plot(csv):
-    df = pd.read_csv(csv, header=0, parse_dates=['date'],
-                     infer_datetime_format=True,
-                     usecols=['date', 'mean', 'median'])
-    output_file('mean_median.html')
-    show(TimeSeries(df.sort('date'), title='Air Temperature',
-                    index='date',
-                    xlabel='Date', ylabel='Air Temperature (°C)', legend=True))
-
-
-def heatmap(csv):
-    import seaborn as sns
-    from matplotlib import pyplot as plt
-    df = pd.read_csv(csv, header=0, parse_dates=['date'],
-                     infer_datetime_format=True)
-    piv = (df.groupby(['row', 'col'], as_index=False)
-             .temp
-             .mean()
-             .pivot('row', 'col', 'temp')
-             .rename(columns=dict(row='Latitude', col='Longitude',
-                                  temp='Average Temperature')))
-    ax = sns.heatmap(piv)
-    for i, (xlabel, ylabel) in enumerate(zip(ax.xaxis.get_ticklabels(),
-                                             ax.yaxis.get_ticklabels())):
-        should_show = bool(i % 50)
-        xlabel.set_visible(should_show)
-        ylabel.set_visible(should_show)
-
-    plt.show()
+        return result, stop - start
+    else:
+        dsk = value(f(files))
+        start = time()
+        with ProgressBar():
+            result = dsk.compute()
+        stop = time()
+        return result, stop - start
 
 
 def fileset_size(files):
@@ -147,7 +134,7 @@ def fileset_size(files):
 if __name__ == '__main__':
     files = [f for f in glob.glob(os.path.join('raw', '*.he5'))]
     total_size = fileset_size(files)
-    runner = dict(do=doit, bag=bagit)[sys.argv[1]]
+    runner = dict(do=doit, bag=bagit, spark=sparkit)[sys.argv[1]]
     _, d = timeit(runner, files)
     print('%s, %.2f G, %d files, %.2f s' %
           (runner.__name__, total_size / 1e9, len(files), d))
