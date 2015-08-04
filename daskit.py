@@ -96,12 +96,16 @@ def doit(files):
     return hc, sm
 
 
-def sparkit(files):
-    bag = sc.parallelize(files).map(data)
-    paths = tensf, sparkf = 'csv/hotcold.spark.csv', 'csv/summary.spark.csv'
+def rmtrees(paths):
     for p in paths:
         if os.path.exists(p):
             shutil.rmtree(p)
+
+
+def sparkit(files):
+    bag = sc.parallelize(files).map(data)
+    tensf, sparkf = 'csv/hotcold.spark.csv', 'csv/summary.spark.csv'
+    rmtrees([tensf, sparkf])
     tens = bag.map(lambda args: ','.join(map(str, top10(*args)[0]))).saveAsTextFile(tensf)
     summaries = bag.map(lambda args: ','.join(map(str, summarize(*args)[0]))).saveAsTextFile(sparkf)
     return tens, summaries
